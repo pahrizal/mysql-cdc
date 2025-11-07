@@ -1,5 +1,6 @@
 *.log
 .binlog_position
 mysql-cdc
+mysql-cdc-*
 .DS_Store
 

@@ -11,6 +11,13 @@ A Go-based MySQL Change Data Capture system that reads row-level changes from My
 - **Graceful Shutdown**: Handles SIGINT/SIGTERM signals gracefully
 - **Configurable**: YAML-based configuration
 
+## Limitations
+
+**Current Limitations:**
+- **Output Destination**: Currently only supports streaming to NATS. Other messaging systems (Kafka, RabbitMQ, etc.) are not supported.
+- **Source Database**: Only MySQL is supported. MariaDB may work but is not officially tested.
+- **MySQL Versions**: Tested with MySQL 5.6, 5.7, and 8.0. Other versions may work but are not guaranteed.
+
 ## Prerequisites
 
 - Go 1.21 or higher
@@ -72,9 +79,21 @@ go mod download
 
 3. Build the application:
 
+**Standard build:**
 ```bash
 go build -o mysql-cdc
 ```
+
+**Static binary for Alpine Linux:**
+```bash
+# Option 1: Use the build script
+./build-static.sh
+
+# Option 2: Build manually
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -a -ldflags '-extldflags "-static"' -o mysql-cdc-linux-amd64
+```
+
+The static binary (`mysql-cdc-linux-amd64`) can be run on Alpine Linux without requiring any additional dependencies or glibc.
 
 ## Configuration
 
@@ -194,6 +213,40 @@ nc, _ := nats.Connect("nats://localhost:4222")
 sub, _ := nc.Subscribe("mysql.cdc.events", func(msg *nats.Msg) {
     fmt.Printf("Received: %s\n", string(msg.Data))
 })
+```
+
+## Docker / Alpine Linux Support
+
+This project can be built as a static binary that runs on Alpine Linux and other minimal Linux distributions. The static binary includes all dependencies and doesn't require glibc.
+
+### Building Static Binary
+
+Use the provided build script:
+```bash
+./build-static.sh
+```
+
+Or build manually:
+```bash
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -a -ldflags '-extldflags "-static"' -o mysql-cdc-linux-amd64
+```
+
+### Docker Example
+
+Example Dockerfile using Alpine Linux:
+
+```dockerfile
+FROM alpine:latest
+
+# Copy the static binary
+COPY mysql-cdc-linux-amd64 /usr/local/bin/mysql-cdc
+COPY config.yaml /etc/mysql-cdc/config.yaml
+
+# Make it executable
+RUN chmod +x /usr/local/bin/mysql-cdc
+
+# Run the application
+CMD ["/usr/local/bin/mysql-cdc", "/etc/mysql-cdc/config.yaml"]
 ```
 
 ## Position Tracking
