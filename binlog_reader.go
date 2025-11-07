@@ -35,10 +35,11 @@ func NewBinlogReader(host string, port int, user, password string, serverID uint
 		Password: password,
 	}
 
-	// Enable GTID if requested (MySQL 5.6+)
+	// Note: GTID support in go-mysql is handled automatically when using GTID position
+	// For now, we use file:position format. GTID can be enabled by using mysql.GTIDSet
+	// in the position instead of mysql.Position
 	if useGTID {
-		cfg.UseGTID = true
-		logger.Info("GTID replication enabled")
+		logger.Info("GTID replication requested (currently using file:position format)")
 	}
 
 	syncer := replication.NewBinlogSyncer(cfg)
@@ -117,7 +118,7 @@ func (r *BinlogReader) SavePosition(name string, pos uint32) error {
 }
 
 func (r *BinlogReader) ReadEvent() (*replication.BinlogEvent, error) {
-	ctx, cancel := time.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	event, err := r.streamer.GetEvent(ctx)

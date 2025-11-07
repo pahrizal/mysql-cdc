@@ -13,9 +13,10 @@ import (
 )
 
 type EventProcessor struct {
-	reader   *BinlogReader
+	reader    *BinlogReader
 	publisher *NATSPublisher
-	logger   *logrus.Logger
+	logger    *logrus.Logger
+	tables    map[uint64]*replication.TableMapEvent // Cache table map events
 }
 
 func NewEventProcessor(reader *BinlogReader, publisher *NATSPublisher, logger *logrus.Logger) *EventProcessor {
@@ -23,64 +24,52 @@ func NewEventProcessor(reader *BinlogReader, publisher *NATSPublisher, logger *l
 		reader:    reader,
 		publisher: publisher,
 		logger:    logger,
+		tables:    make(map[uint64]*replication.TableMapEvent),
 	}
 }
 
-func (p *EventProcessor) ProcessRowEvent(event *replication.RowsEvent) (*ChangeEvent, error) {
+func (p *EventProcessor) ProcessRowEvent(event *replication.RowsEvent, eventType string) (*ChangeEvent, error) {
+	// Get table map for column information
+	tableMap, ok := p.tables[event.TableID]
+	if !ok {
+		return nil, fmt.Errorf("table map not found for table ID %d", event.TableID)
+	}
+
 	changeEvent := &ChangeEvent{
 		Database:  string(event.Table.Schema),
 		Table:     string(event.Table.Table),
 		Timestamp: time.Now().Unix(),
 		Rows:      make([]map[string]interface{}, 0),
 		OldRows:   make([]map[string]interface{}, 0),
+		Type:      eventType,
 	}
 
-	// Handle different event types
-	if event.Action == replication.UpdateAction {
-		changeEvent.Type = "UPDATE"
+	// Process rows based on event type
+	if eventType == "UPDATE" {
 		// For UPDATE, event.Rows contains [old_row_1, new_row_1, old_row_2, new_row_2, ...]
 		for i := 0; i < len(event.Rows); i += 2 {
 			if i+1 < len(event.Rows) {
 				// Old row
 				oldRowMap := make(map[string]interface{})
-				for j, col := range event.Table.Columns {
-					if j < len(event.Rows[i]) {
-						oldRowMap[string(col.Name)] = event.Rows[i][j]
-					}
+				for j := 0; j < len(event.Rows[i]) && j < len(tableMap.ColumnName); j++ {
+					oldRowMap[string(tableMap.ColumnName[j])] = event.Rows[i][j]
 				}
 				changeEvent.OldRows = append(changeEvent.OldRows, oldRowMap)
 
 				// New row
 				newRowMap := make(map[string]interface{})
-				for j, col := range event.Table.Columns {
-					if j < len(event.Rows[i+1]) {
-						newRowMap[string(col.Name)] = event.Rows[i+1][j]
-					}
+				for j := 0; j < len(event.Rows[i+1]) && j < len(tableMap.ColumnName); j++ {
+					newRowMap[string(tableMap.ColumnName[j])] = event.Rows[i+1][j]
 				}
 				changeEvent.Rows = append(changeEvent.Rows, newRowMap)
 			}
 		}
-	} else if event.Action == replication.DeleteAction {
-		changeEvent.Type = "DELETE"
-		// For DELETE, all rows are the deleted rows
+	} else {
+		// For INSERT and DELETE, all rows are the affected rows
 		for _, row := range event.Rows {
 			rowMap := make(map[string]interface{})
-			for i, col := range event.Table.Columns {
-				if i < len(row) {
-					rowMap[string(col.Name)] = row[i]
-				}
-			}
-			changeEvent.Rows = append(changeEvent.Rows, rowMap)
-		}
-	} else if event.Action == replication.InsertAction {
-		changeEvent.Type = "INSERT"
-		// For INSERT, all rows are the new rows
-		for _, row := range event.Rows {
-			rowMap := make(map[string]interface{})
-			for i, col := range event.Table.Columns {
-				if i < len(row) {
-					rowMap[string(col.Name)] = row[i]
-				}
+			for j := 0; j < len(row) && j < len(tableMap.ColumnName); j++ {
+				rowMap[string(tableMap.ColumnName[j])] = row[j]
 			}
 			changeEvent.Rows = append(changeEvent.Rows, rowMap)
 		}
@@ -107,20 +96,37 @@ func (p *EventProcessor) Start(ctx context.Context) error {
 
 			// Process row events
 			switch e := event.Event.(type) {
+			case *replication.TableMapEvent:
+				// Cache table map events for column information
+				p.tables[e.TableID] = e
+				p.logger.Debugf("Cached table map for %s.%s (ID: %d)", string(e.Schema), string(e.Table), e.TableID)
+
 			case *replication.RowsEvent:
-				changeEvent, err := p.ProcessRowEvent(e)
-				if err != nil {
-					p.logger.Errorf("Error processing row event: %v", err)
+				// Determine event type from header
+				var eventType string
+				switch event.Header.EventType {
+				case replication.WRITE_ROWS_EVENTv0, replication.WRITE_ROWS_EVENTv1, replication.WRITE_ROWS_EVENTv2:
+					eventType = "INSERT"
+				case replication.UPDATE_ROWS_EVENTv0, replication.UPDATE_ROWS_EVENTv1, replication.UPDATE_ROWS_EVENTv2:
+					eventType = "UPDATE"
+				case replication.DELETE_ROWS_EVENTv0, replication.DELETE_ROWS_EVENTv1, replication.DELETE_ROWS_EVENTv2:
+					eventType = "DELETE"
+				default:
+					p.logger.Debugf("Unhandled row event type: %d", event.Header.EventType)
 					continue
 				}
 
+				changeEvent, err := p.ProcessRowEvent(e, eventType)
+				if err != nil {
+					p.logger.Errorf("Error processing %s event: %v", eventType, err)
+					continue
+				}
 				if err := p.publisher.Publish(changeEvent); err != nil {
 					p.logger.Errorf("Error publishing event: %v", err)
 					continue
 				}
-
 				p.logger.Infof("Processed %s event for %s.%s (%d rows)",
-					changeEvent.Type, changeEvent.Database, changeEvent.Table, len(changeEvent.Rows))
+					eventType, changeEvent.Database, changeEvent.Table, len(changeEvent.Rows))
 
 			case *replication.RotateEvent:
 				p.logger.Infof("Binlog rotated to: %s", string(e.NextLogName))
