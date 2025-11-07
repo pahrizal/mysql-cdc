@@ -1,7 +1,7 @@
 #!/bin/bash
 # Release script for mysql-cdc
 # Creates individual tar.gz archives for each platform binary
-# Creates a separate tar.gz archive for source code
+# Note: GitHub automatically creates source code archives when you create a release
 
 set -e
 
@@ -13,7 +13,7 @@ echo "Creating release ${VERSION}..."
 
 # Clean up any existing release files
 rm -rf "${TEMP_DIR}"
-rm -f mysql-cdc-*.tar.gz mysql-cdc.tar.gz *.sha256
+rm -f mysql-cdc-*.tar.gz *.sha256
 
 # Create temporary directory
 mkdir -p "${TEMP_DIR}"
@@ -39,15 +39,9 @@ create_platform_archive() {
     if [ -f "${platform_dir}/mysql-cdc${4}" ]; then
         chmod +x "${platform_dir}/mysql-cdc${4}"
     fi
-    
-    # Copy necessary files
-    cp config.yaml "${platform_dir}/"
-    cp README.md "${platform_dir}/"
-    cp LICENSE "${platform_dir}/"
-    echo "${VERSION}" > "${platform_dir}/VERSION"
-    
-    # Create archive
-    tar -czf "${archive_name}" -C "${TEMP_DIR}" "mysql-cdc-${os}-${arch}"
+        
+    # Create archive (files at root level, no nested folder)
+    tar -czf "${archive_name}" -C "${platform_dir}/" .
     
     # Calculate checksum
     if command -v shasum &> /dev/null; then
@@ -87,37 +81,19 @@ echo "  Building Windows AMD64..."
 GOOS=windows GOARCH=amd64 go build -o "${TEMP_DIR}/binary-windows-amd64.exe" ./cmd/mysql-cdc
 create_platform_archive "windows" "amd64" "${TEMP_DIR}/binary-windows-amd64.exe" ".exe"
 
-# Create source code archive
-echo ""
-echo "Creating source code archive..."
-SOURCE_ARCHIVE="mysql-cdc.tar.gz"
-
-# Get list of files to include (from git)
-git archive --format=tar --prefix=mysql-cdc/ HEAD | gzip > "${SOURCE_ARCHIVE}"
-
-# Calculate checksum for source archive
-if command -v shasum &> /dev/null; then
-    shasum -a 256 "${SOURCE_ARCHIVE}" > "${SOURCE_ARCHIVE}.sha256"
-elif command -v sha256sum &> /dev/null; then
-    sha256sum "${SOURCE_ARCHIVE}" > "${SOURCE_ARCHIVE}.sha256"
-fi
-
-echo "  ✓ Created ${SOURCE_ARCHIVE}"
-
 # Clean up temporary directory
 rm -rf "${TEMP_DIR}"
 
 echo ""
 echo "Release ${VERSION} created successfully!"
 echo ""
-echo "Binary archives:"
+echo "Platform archives:"
 ls -lh mysql-cdc-*.tar.gz 2>/dev/null | awk '{print "  " $9 " (" $5 ")"}'
-echo ""
-echo "Source archive:"
-ls -lh mysql-cdc.tar.gz | awk '{print "  " $9 " (" $5 ")"}'
 echo ""
 echo "Checksum files:"
 ls -lh *.sha256 2>/dev/null | awk '{print "  " $9}'
+echo ""
+echo "Note: GitHub will automatically create source code archives (tar.gz and zip) when you create the release."
 echo ""
 echo "Next steps:"
 echo "1. Create and push git tag:"
