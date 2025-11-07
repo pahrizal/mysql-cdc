@@ -2,30 +2,93 @@ package main
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
+	_ "github.com/go-sql-driver/mysql"
 	"github.com/go-mysql-org/go-mysql/replication"
 	"github.com/sirupsen/logrus"
 )
 
 type EventProcessor struct {
-	reader    *BinlogReader
-	publisher *NATSPublisher
-	logger    *logrus.Logger
-	tables    map[uint64]*replication.TableMapEvent // Cache table map events
+	reader       *BinlogReader
+	publisher    *NATSPublisher
+	logger       *logrus.Logger
+	tables       map[uint64]*replication.TableMapEvent // Cache table map events
+	columnNames  map[string][]string                    // Cache column names by "database.table"
+	db           *sql.DB                                // Database connection for fetching column names
 }
 
-func NewEventProcessor(reader *BinlogReader, publisher *NATSPublisher, logger *logrus.Logger) *EventProcessor {
-	return &EventProcessor{
-		reader:    reader,
-		publisher: publisher,
-		logger:    logger,
-		tables:    make(map[uint64]*replication.TableMapEvent),
+func NewEventProcessor(reader *BinlogReader, publisher *NATSPublisher, dbHost string, dbPort int, dbUser, dbPassword string, logger *logrus.Logger) (*EventProcessor, error) {
+	// Create database connection for fetching column names
+	dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/", dbUser, dbPassword, dbHost, dbPort)
+	db, err := sql.Open("mysql", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open database connection: %w", err)
 	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+
+	return &EventProcessor{
+		reader:      reader,
+		publisher:   publisher,
+		logger:      logger,
+		tables:      make(map[uint64]*replication.TableMapEvent),
+		columnNames: make(map[string][]string),
+		db:          db,
+	}, nil
+}
+
+func (p *EventProcessor) Close() {
+	if p.db != nil {
+		p.db.Close()
+	}
+}
+
+// getColumnNames fetches column names from MySQL for a given table
+func (p *EventProcessor) getColumnNames(database, table string) ([]string, error) {
+	// Check cache first
+	cacheKey := fmt.Sprintf("%s.%s", database, table)
+	if cols, ok := p.columnNames[cacheKey]; ok {
+		return cols, nil
+	}
+
+	// Query INFORMATION_SCHEMA for column names
+	query := `
+		SELECT COLUMN_NAME 
+		FROM INFORMATION_SCHEMA.COLUMNS 
+		WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? 
+		ORDER BY ORDINAL_POSITION
+	`
+	rows, err := p.db.Query(query, database, table)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query column names: %w", err)
+	}
+	defer rows.Close()
+
+	var columns []string
+	for rows.Next() {
+		var colName string
+		if err := rows.Scan(&colName); err != nil {
+			return nil, fmt.Errorf("failed to scan column name: %w", err)
+		}
+		columns = append(columns, colName)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating columns: %w", err)
+	}
+
+	// Cache the result
+	p.columnNames[cacheKey] = columns
+	p.logger.Debugf("Fetched %d column names for %s.%s", len(columns), database, table)
+
+	return columns, nil
 }
 
 func (p *EventProcessor) ProcessRowEvent(event *replication.RowsEvent, eventType string) (*ChangeEvent, error) {
@@ -35,9 +98,33 @@ func (p *EventProcessor) ProcessRowEvent(event *replication.RowsEvent, eventType
 		return nil, fmt.Errorf("table map not found for table ID %d", event.TableID)
 	}
 
+	database := string(event.Table.Schema)
+	table := string(event.Table.Table)
+
+	// Get column names - try from TableMapEvent first (MySQL 8.0+), otherwise fetch from MySQL
+	var columnNames []string
+	if len(tableMap.ColumnName) > 0 {
+		// Column names available in binlog (MySQL 8.0+ with binlog_row_metadata)
+		columnNames = make([]string, len(tableMap.ColumnName))
+		for i, col := range tableMap.ColumnName {
+			columnNames[i] = string(col)
+		}
+	} else {
+		// Fetch column names from MySQL (for MySQL 5.6/5.7)
+		var err error
+		columnNames, err = p.getColumnNames(database, table)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get column names: %w", err)
+		}
+		// Ensure we have enough column names
+		if len(columnNames) < int(tableMap.ColumnCount) {
+			p.logger.Warnf("Column count mismatch: expected %d columns, got %d names", tableMap.ColumnCount, len(columnNames))
+		}
+	}
+
 	changeEvent := &ChangeEvent{
-		Database:  string(event.Table.Schema),
-		Table:     string(event.Table.Table),
+		Database:  database,
+		Table:     table,
 		Timestamp: time.Now().Unix(),
 		Rows:      make([]map[string]interface{}, 0),
 		OldRows:   make([]map[string]interface{}, 0),
@@ -51,15 +138,15 @@ func (p *EventProcessor) ProcessRowEvent(event *replication.RowsEvent, eventType
 			if i+1 < len(event.Rows) {
 				// Old row
 				oldRowMap := make(map[string]interface{})
-				for j := 0; j < len(event.Rows[i]) && j < len(tableMap.ColumnName); j++ {
-					oldRowMap[string(tableMap.ColumnName[j])] = event.Rows[i][j]
+				for j := 0; j < len(event.Rows[i]) && j < len(columnNames); j++ {
+					oldRowMap[columnNames[j]] = event.Rows[i][j]
 				}
 				changeEvent.OldRows = append(changeEvent.OldRows, oldRowMap)
 
 				// New row
 				newRowMap := make(map[string]interface{})
-				for j := 0; j < len(event.Rows[i+1]) && j < len(tableMap.ColumnName); j++ {
-					newRowMap[string(tableMap.ColumnName[j])] = event.Rows[i+1][j]
+				for j := 0; j < len(event.Rows[i+1]) && j < len(columnNames); j++ {
+					newRowMap[columnNames[j]] = event.Rows[i+1][j]
 				}
 				changeEvent.Rows = append(changeEvent.Rows, newRowMap)
 			}
@@ -68,8 +155,8 @@ func (p *EventProcessor) ProcessRowEvent(event *replication.RowsEvent, eventType
 		// For INSERT and DELETE, all rows are the affected rows
 		for _, row := range event.Rows {
 			rowMap := make(map[string]interface{})
-			for j := 0; j < len(row) && j < len(tableMap.ColumnName); j++ {
-				rowMap[string(tableMap.ColumnName[j])] = row[j]
+			for j := 0; j < len(row) && j < len(columnNames); j++ {
+				rowMap[columnNames[j]] = row[j]
 			}
 			changeEvent.Rows = append(changeEvent.Rows, rowMap)
 		}
@@ -89,6 +176,14 @@ func (p *EventProcessor) Start(ctx context.Context) error {
 		default:
 			event, err := p.reader.ReadEvent()
 			if err != nil {
+				// Check if it's a timeout error (context deadline exceeded)
+				// This is normal when there are no events, so we don't log it as an error
+				if errors.Is(err, context.DeadlineExceeded) || 
+				   strings.Contains(err.Error(), "context deadline exceeded") {
+					// Timeout is expected when waiting for events, just continue
+					continue
+				}
+				// Log other errors as they indicate real problems
 				p.logger.Errorf("Error reading binlog event: %v", err)
 				time.Sleep(1 * time.Second)
 				continue
@@ -179,6 +274,19 @@ func main() {
 		logger.Info("GTID replication will be used")
 	}
 
+	// Verify MySQL connection and permissions before starting binlog sync
+	logger.Info("Verifying MySQL connection and permissions...")
+	checker := NewMySQLChecker(
+		config.MySQL.Host,
+		config.MySQL.Port,
+		config.MySQL.User,
+		config.MySQL.Password,
+		logger,
+	)
+	if err := checker.CheckConnectionAndPermissions(); err != nil {
+		logger.Fatalf("MySQL connection/permission check failed: %v", err)
+	}
+
 	// Initialize binlog reader
 	reader, err := NewBinlogReader(
 		config.MySQL.Host,
@@ -211,7 +319,19 @@ func main() {
 	defer publisher.Close()
 
 	// Create event processor
-	processor := NewEventProcessor(reader, publisher, logger)
+	processor, err := NewEventProcessor(
+		reader,
+		publisher,
+		config.MySQL.Host,
+		config.MySQL.Port,
+		config.MySQL.User,
+		config.MySQL.Password,
+		logger,
+	)
+	if err != nil {
+		logger.Fatalf("Failed to create event processor: %v", err)
+	}
+	defer processor.Close()
 
 	// Setup graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())

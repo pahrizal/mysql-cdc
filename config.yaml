@@ -1,12 +1,12 @@
 mysql:
   host: localhost
   port: 3306
-  user: root
-  password: ""
+  user: cdc
+  password: cdc
   server_id: 1001
   flavor: mysql  # mysql or mariadb
   version: "5.6"  # Optional: 5.6, 5.7, 8.0, etc. (for documentation/logging)
-  use_gtid: false  # Enable GTID replication (MySQL 5.6+)
+  use_gtid: true  # Enable GTID replication (MySQL 5.6+)
 
 binlog:
   position_file: .binlog_position
@@ -14,8 +14,8 @@ binlog:
   start_timestamp: 0
 
 nats:
-  url: nats://localhost:4222
-  subject: mysql.cdc.events
+  url: nats://localhost:4223
+  subject: cdc.mysql
   max_reconnect: 10
   reconnect_wait: 2s
 

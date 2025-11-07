@@ -24,13 +24,23 @@ Enable binary logging in MySQL (`my.cnf` or `my.ini`):
 **For MySQL 5.6:**
 ```ini
 [mysqld]
+# Required for binlog and GTID
 log-bin=mysql-bin
 binlog-format=ROW
 server-id=1
-# Optional: Enable GTID (recommended for MySQL 5.6+)
+
+# Required for GTID (MySQL 5.6+)
+log-slave-updates=ON
 gtid-mode=ON
 enforce-gtid-consistency=ON
 ```
+
+**Important Notes for MySQL 5.6 GTID:**
+- `log-bin` must be enabled (required for binary logging)
+- `log-slave-updates` must be enabled (required for GTID mode)
+- `gtid-mode=ON` enables GTID replication
+- `enforce-gtid-consistency=ON` ensures only GTID-safe statements are executed
+- After enabling GTID, restart MySQL server
 
 **For MySQL 5.7+:**
 ```ini
@@ -116,8 +126,15 @@ logging:
 
 - MySQL 5.6 is fully supported with the `mysql` flavor
 - GTID support is available in MySQL 5.6.5+ and can be enabled by setting `use_gtid: true`
+- **Required MySQL configuration for GTID:**
+  - `log-bin=mysql-bin` (binary logging)
+  - `log-slave-updates=ON` (required for GTID mode)
+  - `gtid-mode=ON` (enables GTID)
+  - `enforce-gtid-consistency=ON` (ensures GTID-safe operations)
+  - `binlog-format=ROW` (required for row-level CDC)
 - When using GTID, the position file will store GTID information instead of file:position format
-- Ensure `binlog-format=ROW` is set in MySQL configuration for row-level CDC
+- After enabling GTID in MySQL config, restart the MySQL server
+- If you get errors about missing `log-bin` or `log-slave-updates`, ensure both are enabled in your MySQL configuration
 
 ## Usage
 
@@ -189,6 +206,11 @@ The application saves the current binlog position to `.binlog_position` file. On
 2. **No events**: Ensure binlog is enabled and `binlog-format=ROW` is set
 3. **NATS connection issues**: Verify NATS server is running and URL is correct
 4. **Permission errors**: Ensure the application has write access to the position file directory
+5. **GTID configuration errors**: 
+   - If you get `--gtid-mode=ON requires --log-bin and --log-slave-updates`, ensure both are enabled in MySQL config
+   - Add `log-slave-updates=ON` to your `my.cnf` file
+   - Restart MySQL after configuration changes
+   - See `GTID_CONFIG.md` for detailed GTID setup instructions
 
 ## License
 

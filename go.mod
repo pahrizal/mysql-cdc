@@ -4,6 +4,7 @@ go 1.21
 
 require (
 	github.com/go-mysql-org/go-mysql v1.7.0
+	github.com/go-sql-driver/mysql v1.7.1
 	github.com/nats-io/nats.go v1.31.0
 	github.com/sirupsen/logrus v1.9.3
 	gopkg.in/yaml.v3 v3.0.1
