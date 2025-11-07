@@ -1,4 +1,4 @@
-package main
+package binlog
 
 import (
 	"context"
@@ -11,7 +11,8 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-type BinlogReader struct {
+// Reader handles reading binlog events from MySQL
+type Reader struct {
 	syncer       *replication.BinlogSyncer
 	streamer     *replication.BinlogStreamer
 	position     mysql.Position
@@ -20,7 +21,8 @@ type BinlogReader struct {
 	logger       *logrus.Logger
 }
 
-func NewBinlogReader(host string, port int, user, password string, serverID uint32, flavor string, useGTID bool, positionFile string, startPos uint32, logger *logrus.Logger) (*BinlogReader, error) {
+// NewReader creates a new binlog reader
+func NewReader(host string, port int, user, password string, serverID uint32, flavor string, useGTID bool, positionFile string, startPos uint32, logger *logrus.Logger) (*Reader, error) {
 	// Set default flavor if not specified
 	if flavor == "" {
 		flavor = "mysql"
@@ -89,7 +91,7 @@ func NewBinlogReader(host string, port int, user, password string, serverID uint
 
 	logger.Infof("Started binlog sync from position: %s:%d", position.Name, position.Pos)
 
-	return &BinlogReader{
+	return &Reader{
 		syncer:       syncer,
 		streamer:     streamer,
 		position:     position,
@@ -99,7 +101,8 @@ func NewBinlogReader(host string, port int, user, password string, serverID uint
 	}, nil
 }
 
-func (r *BinlogReader) SavePosition(name string, pos uint32) error {
+// SavePosition saves the current binlog position to file
+func (r *Reader) SavePosition(name string, pos uint32) error {
 	if name == "" {
 		name = r.currentFile
 	}
@@ -117,7 +120,8 @@ func (r *BinlogReader) SavePosition(name string, pos uint32) error {
 	return nil
 }
 
-func (r *BinlogReader) ReadEvent() (*replication.BinlogEvent, error) {
+// ReadEvent reads the next binlog event
+func (r *Reader) ReadEvent() (*replication.BinlogEvent, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -146,7 +150,8 @@ func (r *BinlogReader) ReadEvent() (*replication.BinlogEvent, error) {
 	return event, nil
 }
 
-func (r *BinlogReader) Close() {
+// Close closes the binlog reader
+func (r *Reader) Close() {
 	if r.syncer != nil {
 		r.syncer.Close()
 	}

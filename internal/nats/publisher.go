@@ -1,4 +1,4 @@
-package main
+package nats
 
 import (
 	"encoding/json"
@@ -7,15 +7,19 @@ import (
 
 	"github.com/nats-io/nats.go"
 	"github.com/sirupsen/logrus"
+
+	"mysql-cdc/internal/models"
 )
 
-type NATSPublisher struct {
+// Publisher handles publishing events to NATS
+type Publisher struct {
 	conn    *nats.Conn
 	subject string
 	logger  *logrus.Logger
 }
 
-func NewNATSPublisher(url, subject string, maxReconnect int, reconnectWait time.Duration, logger *logrus.Logger) (*NATSPublisher, error) {
+// NewPublisher creates a new NATS publisher
+func NewPublisher(url, subject string, maxReconnect int, reconnectWait time.Duration, logger *logrus.Logger) (*Publisher, error) {
 	opts := []nats.Option{
 		nats.MaxReconnects(maxReconnect),
 		nats.ReconnectWait(reconnectWait),
@@ -39,23 +43,15 @@ func NewNATSPublisher(url, subject string, maxReconnect int, reconnectWait time.
 
 	logger.Infof("Connected to NATS at %s", url)
 
-	return &NATSPublisher{
+	return &Publisher{
 		conn:    conn,
 		subject: subject,
 		logger:  logger,
 	}, nil
 }
 
-type ChangeEvent struct {
-	Type      string                 `json:"type"`      // INSERT, UPDATE, DELETE
-	Database  string                 `json:"database"`
-	Table     string                 `json:"table"`
-	Timestamp int64                  `json:"timestamp"`
-	Rows      []map[string]interface{} `json:"rows"`
-	OldRows   []map[string]interface{} `json:"old_rows,omitempty"` // For UPDATE events
-}
-
-func (p *NATSPublisher) Publish(event *ChangeEvent) error {
+// Publish publishes a change event to NATS
+func (p *Publisher) Publish(event *models.ChangeEvent) error {
 	data, err := json.Marshal(event)
 	if err != nil {
 		return fmt.Errorf("failed to marshal event: %w", err)
@@ -69,7 +65,8 @@ func (p *NATSPublisher) Publish(event *ChangeEvent) error {
 	return nil
 }
 
-func (p *NATSPublisher) Close() {
+// Close closes the NATS connection
+func (p *Publisher) Close() {
 	if p.conn != nil {
 		p.conn.Close()
 	}

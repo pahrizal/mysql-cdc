@@ -1,4 +1,4 @@
-package main
+package mysql
 
 import (
 	"database/sql"
@@ -9,8 +9,8 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-// MySQLChecker validates MySQL connection and required permissions
-type MySQLChecker struct {
+// Checker validates MySQL connection and required permissions
+type Checker struct {
 	host     string
 	port     int
 	user     string
@@ -18,9 +18,9 @@ type MySQLChecker struct {
 	logger   *logrus.Logger
 }
 
-// NewMySQLChecker creates a new MySQL checker
-func NewMySQLChecker(host string, port int, user, password string, logger *logrus.Logger) *MySQLChecker {
-	return &MySQLChecker{
+// NewChecker creates a new MySQL checker
+func NewChecker(host string, port int, user, password string, logger *logrus.Logger) *Checker {
+	return &Checker{
 		host:     host,
 		port:     port,
 		user:     user,
@@ -30,7 +30,7 @@ func NewMySQLChecker(host string, port int, user, password string, logger *logru
 }
 
 // CheckConnectionAndPermissions verifies MySQL connection and required permissions
-func (c *MySQLChecker) CheckConnectionAndPermissions() error {
+func (c *Checker) CheckConnectionAndPermissions() error {
 	// Build DSN
 	dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/", c.user, c.password, c.host, c.port)
 

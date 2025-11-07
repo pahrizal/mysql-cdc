@@ -1,4 +1,4 @@
-package main
+package config
 
 import (
 	"fmt"
@@ -8,6 +8,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// Config represents the application configuration
 type Config struct {
 	MySQL   MySQLConfig   `yaml:"mysql"`
 	Binlog  BinlogConfig  `yaml:"binlog"`
@@ -15,6 +16,7 @@ type Config struct {
 	Logging LoggingConfig `yaml:"logging"`
 }
 
+// MySQLConfig contains MySQL connection settings
 type MySQLConfig struct {
 	Host     string `yaml:"host"`
 	Port     int    `yaml:"port"`
@@ -26,12 +28,14 @@ type MySQLConfig struct {
 	UseGTID  bool   `yaml:"use_gtid"` // Use GTID for replication (MySQL 5.6+)
 }
 
+// BinlogConfig contains binlog settings
 type BinlogConfig struct {
 	PositionFile  string `yaml:"position_file"`
 	StartPosition uint32 `yaml:"start_position"`
 	StartTimestamp uint32 `yaml:"start_timestamp"`
 }
 
+// NATSConfig contains NATS connection settings
 type NATSConfig struct {
 	URL           string        `yaml:"url"`
 	Subject       string        `yaml:"subject"`
@@ -39,10 +43,12 @@ type NATSConfig struct {
 	ReconnectWait time.Duration `yaml:"reconnect_wait"`
 }
 
+// LoggingConfig contains logging settings
 type LoggingConfig struct {
 	Level string `yaml:"level"`
 }
 
+// LoadConfig loads configuration from a YAML file
 func LoadConfig(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {

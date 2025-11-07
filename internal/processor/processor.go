@@ -1,31 +1,42 @@
-package main
+package processor
 
 import (
 	"context"
 	"database/sql"
 	"errors"
 	"fmt"
-	"os"
-	"os/signal"
 	"strings"
-	"syscall"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/go-mysql-org/go-mysql/replication"
 	"github.com/sirupsen/logrus"
+
+	"mysql-cdc/internal/models"
 )
 
-type EventProcessor struct {
-	reader       *BinlogReader
-	publisher    *NATSPublisher
-	logger       *logrus.Logger
-	tables       map[uint64]*replication.TableMapEvent // Cache table map events
-	columnNames  map[string][]string                    // Cache column names by "database.table"
-	db           *sql.DB                                // Database connection for fetching column names
+// Processor processes binlog events and publishes them
+type Processor struct {
+	reader      Reader
+	publisher   Publisher
+	logger      *logrus.Logger
+	tables      map[uint64]*replication.TableMapEvent // Cache table map events
+	columnNames map[string][]string                    // Cache column names by "database.table"
+	db          *sql.DB                                // Database connection for fetching column names
 }
 
-func NewEventProcessor(reader *BinlogReader, publisher *NATSPublisher, dbHost string, dbPort int, dbUser, dbPassword string, logger *logrus.Logger) (*EventProcessor, error) {
+// Reader interface for reading binlog events
+type Reader interface {
+	ReadEvent() (*replication.BinlogEvent, error)
+}
+
+// Publisher interface for publishing events
+type Publisher interface {
+	Publish(event *models.ChangeEvent) error
+}
+
+// NewProcessor creates a new event processor
+func NewProcessor(reader Reader, publisher Publisher, dbHost string, dbPort int, dbUser, dbPassword string, logger *logrus.Logger) (*Processor, error) {
 	// Create database connection for fetching column names
 	dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/", dbUser, dbPassword, dbHost, dbPort)
 	db, err := sql.Open("mysql", dsn)
@@ -35,7 +46,7 @@ func NewEventProcessor(reader *BinlogReader, publisher *NATSPublisher, dbHost st
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 
-	return &EventProcessor{
+	return &Processor{
 		reader:      reader,
 		publisher:   publisher,
 		logger:      logger,
@@ -45,14 +56,15 @@ func NewEventProcessor(reader *BinlogReader, publisher *NATSPublisher, dbHost st
 	}, nil
 }
 
-func (p *EventProcessor) Close() {
+// Close closes the processor and its database connection
+func (p *Processor) Close() {
 	if p.db != nil {
 		p.db.Close()
 	}
 }
 
 // getColumnNames fetches column names from MySQL for a given table
-func (p *EventProcessor) getColumnNames(database, table string) ([]string, error) {
+func (p *Processor) getColumnNames(database, table string) ([]string, error) {
 	// Check cache first
 	cacheKey := fmt.Sprintf("%s.%s", database, table)
 	if cols, ok := p.columnNames[cacheKey]; ok {
@@ -91,7 +103,8 @@ func (p *EventProcessor) getColumnNames(database, table string) ([]string, error
 	return columns, nil
 }
 
-func (p *EventProcessor) ProcessRowEvent(event *replication.RowsEvent, eventType string) (*ChangeEvent, error) {
+// ProcessRowEvent processes a row event and returns a change event
+func (p *Processor) ProcessRowEvent(event *replication.RowsEvent, eventType string) (*models.ChangeEvent, error) {
 	// Get table map for column information
 	tableMap, ok := p.tables[event.TableID]
 	if !ok {
@@ -122,7 +135,7 @@ func (p *EventProcessor) ProcessRowEvent(event *replication.RowsEvent, eventType
 		}
 	}
 
-	changeEvent := &ChangeEvent{
+	changeEvent := &models.ChangeEvent{
 		Database:  database,
 		Table:     table,
 		Timestamp: time.Now().Unix(),
@@ -165,7 +178,8 @@ func (p *EventProcessor) ProcessRowEvent(event *replication.RowsEvent, eventType
 	return changeEvent, nil
 }
 
-func (p *EventProcessor) Start(ctx context.Context) error {
+// Start starts processing binlog events
+func (p *Processor) Start(ctx context.Context) error {
 	p.logger.Info("Starting event processor...")
 
 	for {
@@ -178,8 +192,8 @@ func (p *EventProcessor) Start(ctx context.Context) error {
 			if err != nil {
 				// Check if it's a timeout error (context deadline exceeded)
 				// This is normal when there are no events, so we don't log it as an error
-				if errors.Is(err, context.DeadlineExceeded) || 
-				   strings.Contains(err.Error(), "context deadline exceeded") {
+				if errors.Is(err, context.DeadlineExceeded) ||
+					strings.Contains(err.Error(), "context deadline exceeded") {
 					// Timeout is expected when waiting for events, just continue
 					continue
 				}
@@ -238,125 +252,5 @@ func (p *EventProcessor) Start(ctx context.Context) error {
 			}
 		}
 	}
-}
-
-func main() {
-	// Setup logger
-	logger := logrus.New()
-	logger.SetFormatter(&logrus.TextFormatter{
-		FullTimestamp: true,
-	})
-	logger.SetLevel(logrus.InfoLevel)
-
-	// Load configuration
-	configPath := "config.yaml"
-	if len(os.Args) > 1 {
-		configPath = os.Args[1]
-	}
-
-	config, err := LoadConfig(configPath)
-	if err != nil {
-		logger.Fatalf("Failed to load config: %v", err)
-	}
-
-	// Set log level from config
-	if level, err := logrus.ParseLevel(config.Logging.Level); err == nil {
-		logger.SetLevel(level)
-	}
-
-	logger.Info("Starting MySQL CDC service...")
-
-	// Log MySQL version if specified
-	if config.MySQL.Version != "" {
-		logger.Infof("MySQL version: %s", config.MySQL.Version)
-	}
-	if config.MySQL.UseGTID {
-		logger.Info("GTID replication will be used")
-	}
-
-	// Verify MySQL connection and permissions before starting binlog sync
-	logger.Info("Verifying MySQL connection and permissions...")
-	checker := NewMySQLChecker(
-		config.MySQL.Host,
-		config.MySQL.Port,
-		config.MySQL.User,
-		config.MySQL.Password,
-		logger,
-	)
-	if err := checker.CheckConnectionAndPermissions(); err != nil {
-		logger.Fatalf("MySQL connection/permission check failed: %v", err)
-	}
-
-	// Initialize binlog reader
-	reader, err := NewBinlogReader(
-		config.MySQL.Host,
-		config.MySQL.Port,
-		config.MySQL.User,
-		config.MySQL.Password,
-		config.MySQL.ServerID,
-		config.MySQL.Flavor,
-		config.MySQL.UseGTID,
-		config.Binlog.PositionFile,
-		config.Binlog.StartPosition,
-		logger,
-	)
-	if err != nil {
-		logger.Fatalf("Failed to create binlog reader: %v", err)
-	}
-	defer reader.Close()
-
-	// Initialize NATS publisher
-	publisher, err := NewNATSPublisher(
-		config.NATS.URL,
-		config.NATS.Subject,
-		config.NATS.MaxReconnect,
-		config.NATS.ReconnectWait,
-		logger,
-	)
-	if err != nil {
-		logger.Fatalf("Failed to create NATS publisher: %v", err)
-	}
-	defer publisher.Close()
-
-	// Create event processor
-	processor, err := NewEventProcessor(
-		reader,
-		publisher,
-		config.MySQL.Host,
-		config.MySQL.Port,
-		config.MySQL.User,
-		config.MySQL.Password,
-		logger,
-	)
-	if err != nil {
-		logger.Fatalf("Failed to create event processor: %v", err)
-	}
-	defer processor.Close()
-
-	// Setup graceful shutdown
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-
-	// Start processing in goroutine
-	errChan := make(chan error, 1)
-	go func() {
-		errChan <- processor.Start(ctx)
-	}()
-
-	// Wait for signal or error
-	select {
-	case sig := <-sigChan:
-		logger.Infof("Received signal: %v, shutting down...", sig)
-		cancel()
-	case err := <-errChan:
-		if err != nil {
-			logger.Errorf("Processor error: %v", err)
-		}
-	}
-
-	logger.Info("MySQL CDC service stopped")
 }
 

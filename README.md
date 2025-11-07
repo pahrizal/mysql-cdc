@@ -18,6 +18,29 @@ A Go-based MySQL Change Data Capture system that reads row-level changes from My
 - **Source Database**: Only MySQL is supported. MariaDB may work but is not officially tested.
 - **MySQL Versions**: Tested with MySQL 5.6, 5.7, and 8.0. Other versions may work but are not guaranteed.
 
+## Project Structure
+
+This project follows Go best practices with a standard project layout:
+
+```
+mysql-cdc/
+├── cmd/
+│   └── mysql-cdc/          # Main application entry point
+│       └── main.go
+├── internal/                # Private application code
+│   ├── binlog/             # Binlog reader implementation
+│   ├── config/             # Configuration loading
+│   ├── models/              # Shared data models
+│   ├── mysql/               # MySQL connection checker
+│   ├── nats/                # NATS publisher
+│   └── processor/           # Event processor
+├── scripts/                 # Build and utility scripts
+│   └── build-static.sh
+├── config.yaml              # Configuration file
+├── go.mod                   # Go module definition
+└── README.md                # This file
+```
+
 ## Prerequisites
 
 - Go 1.21 or higher
@@ -81,16 +104,16 @@ go mod download
 
 **Standard build:**
 ```bash
-go build -o mysql-cdc
+go build -o mysql-cdc ./cmd/mysql-cdc
 ```
 
 **Static binary for Alpine Linux:**
 ```bash
 # Option 1: Use the build script
-./build-static.sh
+./scripts/build-static.sh
 
 # Option 2: Build manually
-GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -a -ldflags '-extldflags "-static"' -o mysql-cdc-linux-amd64
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -a -ldflags '-extldflags "-static"' -o mysql-cdc-linux-amd64 ./cmd/mysql-cdc
 ```
 
 The static binary (`mysql-cdc-linux-amd64`) can be run on Alpine Linux without requiring any additional dependencies or glibc.
