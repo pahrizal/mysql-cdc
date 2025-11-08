@@ -80,3 +80,8 @@ func (p *Publisher) Close() {
 	}
 }
 
+// GetConn returns the underlying NATS connection
+func (p *Publisher) GetConn() *nats.Conn {
+	return p.conn
+}
+

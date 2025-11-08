@@ -8,6 +8,7 @@ A Go-based MySQL Change Data Capture system that reads row-level changes from My
 - **Binlog Reading**: Directly reads from MySQL binary log (binlog)
 - **NATS Streaming**: Publishes change events to NATS subjects
 - **Data Transformation**: Configurable processor to transform data before publishing (YAML rules or JavaScript scripts)
+- **NATS Integration in Scripts**: JavaScript transformers can publish to additional NATS subjects and use NATS KV store
 - **Position Tracking**: Persists binlog position for recovery and resumption
 - **Graceful Shutdown**: Handles SIGINT/SIGTERM signals gracefully
 - **Configurable**: YAML-based configuration
@@ -134,6 +135,8 @@ You can write custom JavaScript transformation scripts for maximum flexibility. 
 - **Full Event Access**: Access all event properties including `type`, `database`, `table`, `timestamp`, `rows`, and `old_rows`
 - **Row Transformation**: Modify, filter, or add fields to individual rows
 - **Metadata Addition**: Add custom fields to the event object
+- **NATS Integration**: Access NATS connection to publish to additional subjects or use KV store
+- **Console Support**: Use `console.log()`, `console.error()`, `console.warn()`, `console.info()`, and `console.debug()` for logging
 
 **Example JavaScript script using anonymous function (`scripts/transform.js`):**
 
@@ -201,6 +204,100 @@ processor:
 ```
 
 **Event Rejection:** Return `null` or `undefined` to reject/drop an event (it won't be published to NATS).
+
+### NATS Resources in JavaScript Scripts
+
+The transformer script has access to NATS resources through the global `nats` object. This allows you to:
+
+1. **Publish to additional NATS subjects**: Route events to different subjects based on conditions
+2. **Use NATS KV store**: Store and retrieve data during transformation
+
+**Available NATS Functions:**
+
+- `nats.publish(subject, data)` - Publish data to a NATS subject
+  - `subject` (string): The NATS subject to publish to
+  - `data` (string|object): The data to publish (strings are sent as-is, objects are JSON-marshaled)
+
+- `nats.kv.get(bucket, key)` - Get a value from NATS KV store
+  - `bucket` (string): The KV bucket name
+  - `key` (string): The key to retrieve
+  - Returns: The value as a string, or `null` if not found
+
+- `nats.kv.put(bucket, key, value)` - Store a value in NATS KV store
+  - `bucket` (string): The KV bucket name
+  - `key` (string): The key to store
+  - `value` (string|object): The value to store (strings are stored as-is, objects are JSON-marshaled)
+
+- `nats.kv.delete(bucket, key)` - Delete a key from NATS KV store
+  - `bucket` (string): The KV bucket name
+  - `key` (string): The key to delete
+
+**Example: Using NATS Resources**
+
+```javascript
+(function(event) {
+    // Example: Publish to different subjects based on event type
+    try {
+        if (event.type === 'INSERT') {
+            nats.publish('cdc.mysql.inserts', JSON.stringify(event));
+        } else if (event.type === 'UPDATE') {
+            nats.publish('cdc.mysql.updates', JSON.stringify(event));
+        } else if (event.type === 'DELETE') {
+            nats.publish('cdc.mysql.deletes', JSON.stringify(event));
+        }
+    } catch (err) {
+        console.error('NATS publish error:', err);
+    }
+    
+    // Example: Use KV store to track last processed timestamp
+    try {
+        const lastKey = `last_processed.${event.database}.${event.table}`;
+        const lastProcessed = nats.kv.get('cdc_metadata', lastKey);
+        
+        if (lastProcessed) {
+            const lastTime = parseInt(lastProcessed);
+            if (event.timestamp > lastTime) {
+                // Update last processed timestamp
+                nats.kv.put('cdc_metadata', lastKey, event.timestamp.toString());
+            }
+        } else {
+            // First time processing this table
+            nats.kv.put('cdc_metadata', lastKey, event.timestamp.toString());
+        }
+    } catch (err) {
+        console.error('NATS KV error:', err);
+        // Continue processing even if KV operations fail
+    }
+    
+    // Example: Store event metadata in KV for later retrieval
+    try {
+        const eventKey = `${event.database}.${event.table}.${event.timestamp}`;
+        nats.kv.put('event_metadata', eventKey, JSON.stringify({
+            type: event.type,
+            timestamp: event.timestamp,
+            row_count: event.rows ? event.rows.length : 0
+        }));
+    } catch (err) {
+        console.warn('Failed to store event metadata:', err);
+    }
+    
+    return event;
+})
+```
+
+**Important Notes:**
+
+- **KV Store Requirements**: For `nats.kv` operations to work, NATS JetStream must be enabled and the KV bucket must exist. Create a bucket using:
+  ```bash
+  nats kv add mybucket
+  ```
+
+- **Error Handling**: Always wrap NATS operations in try-catch blocks, as they may fail if:
+  - JetStream is not enabled
+  - KV bucket doesn't exist
+  - NATS connection issues occur
+
+- **Console Logging**: Use `console.log()`, `console.error()`, `console.warn()`, `console.info()`, or `console.debug()` for logging. Messages are logged through the application logger at the corresponding log levels.
 
 ### YAML-Based Rules Processor
 

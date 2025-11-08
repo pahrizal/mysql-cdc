@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/dop251/goja"
+	"github.com/nats-io/nats.go"
 	"github.com/sirupsen/logrus"
 
 	"mysql-cdc/internal/config"
@@ -23,7 +24,8 @@ type Transformer struct {
 	config      *config.ProcessorConfig
 	logger      *logrus.Logger
 	rules       []*RuleMatcher
-	jsScript    string // Cached script content
+	jsScript    string     // Cached script content
+	natsConn    *nats.Conn // NATS connection for JavaScript bindings
 }
 
 // RuleMatcher matches and applies transformation rules
@@ -37,19 +39,21 @@ type RuleMatcher struct {
 }
 
 // NewTransformer creates a new transformer with the given configuration
-func NewTransformer(cfg *config.ProcessorConfig, logger *logrus.Logger) (*Transformer, error) {
+func NewTransformer(cfg *config.ProcessorConfig, logger *logrus.Logger, natsConn *nats.Conn) (*Transformer, error) {
 	if cfg == nil || !cfg.Enabled {
 		return &Transformer{
-			config: cfg,
-			logger: logger,
-			rules:  []*RuleMatcher{},
+			config:   cfg,
+			logger:   logger,
+			rules:    []*RuleMatcher{},
+			natsConn: natsConn,
 		}, nil
 	}
 
 	transformer := &Transformer{
-		config: cfg,
-		logger: logger,
-		rules:  []*RuleMatcher{},
+		config:   cfg,
+		logger:   logger,
+		rules:    []*RuleMatcher{},
+		natsConn: natsConn,
 	}
 
 	// Load JavaScript script if specified
@@ -165,6 +169,18 @@ func (t *Transformer) transformWithJavaScript(event *models.ChangeEvent) (*model
 
 	// Create a new runtime context for this transformation (goja.Runtime is not thread-safe)
 	vm := goja.New()
+
+	// Setup console bindings for JavaScript
+	if err := t.setupConsoleBindings(vm); err != nil {
+		return nil, fmt.Errorf("failed to setup console bindings: %w", err)
+	}
+
+	// Expose NATS functionality to JavaScript if NATS connection is available
+	if t.natsConn != nil {
+		if err := t.setupNATSBindings(vm); err != nil {
+			return nil, fmt.Errorf("failed to setup NATS bindings: %w", err)
+		}
+	}
 
 	// Execute the script - support both anonymous functions and named functions
 	scriptResult, err := vm.RunString(t.jsScript)
@@ -373,6 +389,253 @@ func (r *RuleMatcher) matches(database, table string) bool {
 	}
 
 	return true
+}
+
+// setupConsoleBindings sets up console JavaScript bindings in the VM
+func (t *Transformer) setupConsoleBindings(vm *goja.Runtime) error {
+	consoleObj := vm.NewObject()
+
+	// Helper function to format console arguments
+	formatArgs := func(call goja.FunctionCall) string {
+		args := make([]interface{}, len(call.Arguments))
+		for i, arg := range call.Arguments {
+			args[i] = arg.Export()
+		}
+		return fmt.Sprint(args...)
+	}
+
+	// console.log
+	logFn := func(call goja.FunctionCall) goja.Value {
+		t.logger.Info(formatArgs(call))
+		return goja.Undefined()
+	}
+
+	// console.error
+	errorFn := func(call goja.FunctionCall) goja.Value {
+		t.logger.Error(formatArgs(call))
+		return goja.Undefined()
+	}
+
+	// console.warn
+	warnFn := func(call goja.FunctionCall) goja.Value {
+		t.logger.Warn(formatArgs(call))
+		return goja.Undefined()
+	}
+
+	// console.info
+	infoFn := func(call goja.FunctionCall) goja.Value {
+		t.logger.Info(formatArgs(call))
+		return goja.Undefined()
+	}
+
+	// console.debug
+	debugFn := func(call goja.FunctionCall) goja.Value {
+		t.logger.Debug(formatArgs(call))
+		return goja.Undefined()
+	}
+
+	if err := consoleObj.Set("log", logFn); err != nil {
+		return fmt.Errorf("failed to set console.log: %w", err)
+	}
+	if err := consoleObj.Set("error", errorFn); err != nil {
+		return fmt.Errorf("failed to set console.error: %w", err)
+	}
+	if err := consoleObj.Set("warn", warnFn); err != nil {
+		return fmt.Errorf("failed to set console.warn: %w", err)
+	}
+	if err := consoleObj.Set("info", infoFn); err != nil {
+		return fmt.Errorf("failed to set console.info: %w", err)
+	}
+	if err := consoleObj.Set("debug", debugFn); err != nil {
+		return fmt.Errorf("failed to set console.debug: %w", err)
+	}
+
+	if err := vm.Set("console", consoleObj); err != nil {
+		return fmt.Errorf("failed to set console object: %w", err)
+	}
+
+	return nil
+}
+
+// setupNATSBindings sets up NATS JavaScript bindings in the VM
+func (t *Transformer) setupNATSBindings(vm *goja.Runtime) error {
+	// Create NATS object
+	natsObj := vm.NewObject()
+
+	// Add publish function
+	publishFn := func(call goja.FunctionCall) goja.Value {
+		subject := call.Argument(0).String()
+		if subject == "" {
+			panic(vm.NewTypeError("nats.publish: subject is required"))
+		}
+
+		dataArg := call.Argument(1)
+		var dataBytes []byte
+		var err error
+
+		// Convert data to bytes
+		if goja.IsUndefined(dataArg) || goja.IsNull(dataArg) {
+			panic(vm.NewTypeError("nats.publish: data is required"))
+		}
+
+		exported := dataArg.Export()
+		switch v := exported.(type) {
+		case string:
+			dataBytes = []byte(v)
+		case []byte:
+			dataBytes = v
+		default:
+			// Try to marshal as JSON
+			dataBytes, err = json.Marshal(exported)
+			if err != nil {
+				panic(vm.NewTypeError("nats.publish: failed to marshal data: %v", err))
+			}
+		}
+
+		if err := t.natsConn.Publish(subject, dataBytes); err != nil {
+			t.logger.Errorf("NATS publish error: %v", err)
+			panic(vm.NewGoError(err))
+		}
+
+		t.logger.Debugf("Published to NATS subject: %s", subject)
+		return goja.Undefined()
+	}
+
+	if err := natsObj.Set("publish", publishFn); err != nil {
+		return fmt.Errorf("failed to set publish function: %w", err)
+	}
+
+	// Add KV store object
+	kvObj := vm.NewObject()
+
+	// Get KV store (lazy initialization)
+	getKVStore := func(bucket string) (nats.KeyValue, error) {
+		// Check if we already have a JS context initialized
+		js, err := t.natsConn.JetStream()
+		if err != nil {
+			return nil, fmt.Errorf("failed to get JetStream context: %w", err)
+		}
+
+		kv, err := js.KeyValue(bucket)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get KV store '%s': %w", bucket, err)
+		}
+
+		return kv, nil
+	}
+
+	// KV get function
+	kvGetFn := func(call goja.FunctionCall) goja.Value {
+		bucket := call.Argument(0).String()
+		key := call.Argument(1).String()
+		if bucket == "" || key == "" {
+			panic(vm.NewTypeError("nats.kv.get: bucket and key are required"))
+		}
+
+		kv, err := getKVStore(bucket)
+		if err != nil {
+			panic(vm.NewGoError(err))
+		}
+
+		entry, err := kv.Get(key)
+		if err != nil {
+			if err == nats.ErrKeyNotFound {
+				return goja.Null() // Return null for not found
+			}
+			t.logger.Errorf("KV get error: %v", err)
+			panic(vm.NewGoError(err))
+		}
+
+		// Return the value as string (KV stores bytes)
+		return vm.ToValue(string(entry.Value()))
+	}
+
+	// KV put function
+	kvPutFn := func(call goja.FunctionCall) goja.Value {
+		bucket := call.Argument(0).String()
+		key := call.Argument(1).String()
+		valueArg := call.Argument(2)
+
+		if bucket == "" || key == "" {
+			panic(vm.NewTypeError("nats.kv.put: bucket and key are required"))
+		}
+
+		if goja.IsUndefined(valueArg) || goja.IsNull(valueArg) {
+			panic(vm.NewTypeError("nats.kv.put: value is required"))
+		}
+
+		kv, err := getKVStore(bucket)
+		if err != nil {
+			panic(vm.NewGoError(err))
+		}
+
+		var valueBytes []byte
+		exported := valueArg.Export()
+		switch v := exported.(type) {
+		case string:
+			valueBytes = []byte(v)
+		case []byte:
+			valueBytes = v
+		default:
+			// Try to marshal as JSON
+			var err error
+			valueBytes, err = json.Marshal(exported)
+			if err != nil {
+				panic(vm.NewTypeError("nats.kv.put: failed to marshal value: %v", err))
+			}
+		}
+
+		if _, err := kv.Put(key, valueBytes); err != nil {
+			t.logger.Errorf("KV put error: %v", err)
+			panic(vm.NewGoError(err))
+		}
+
+		t.logger.Debugf("Put to KV store '%s' key '%s'", bucket, key)
+		return goja.Undefined()
+	}
+
+	// KV delete function
+	kvDeleteFn := func(call goja.FunctionCall) goja.Value {
+		bucket := call.Argument(0).String()
+		key := call.Argument(1).String()
+		if bucket == "" || key == "" {
+			panic(vm.NewTypeError("nats.kv.delete: bucket and key are required"))
+		}
+
+		kv, err := getKVStore(bucket)
+		if err != nil {
+			panic(vm.NewGoError(err))
+		}
+
+		if err := kv.Delete(key); err != nil {
+			t.logger.Errorf("KV delete error: %v", err)
+			panic(vm.NewGoError(err))
+		}
+
+		t.logger.Debugf("Deleted from KV store '%s' key '%s'", bucket, key)
+		return goja.Undefined()
+	}
+
+	if err := kvObj.Set("get", kvGetFn); err != nil {
+		return fmt.Errorf("failed to set KV get function: %w", err)
+	}
+	if err := kvObj.Set("put", kvPutFn); err != nil {
+		return fmt.Errorf("failed to set KV put function: %w", err)
+	}
+	if err := kvObj.Set("delete", kvDeleteFn); err != nil {
+		return fmt.Errorf("failed to set KV delete function: %w", err)
+	}
+
+	if err := natsObj.Set("kv", kvObj); err != nil {
+		return fmt.Errorf("failed to set KV object: %w", err)
+	}
+
+	// Set global 'nats' object
+	if err := vm.Set("nats", natsObj); err != nil {
+		return fmt.Errorf("failed to set nats object: %w", err)
+	}
+
+	return nil
 }
 
 // ValidateRules validates processor configuration rules
