@@ -58,27 +58,27 @@ echo "Building binaries..."
 
 # Linux AMD64 (static binary for Alpine Linux)
 echo "  Building Linux AMD64..."
-GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -a -ldflags '-extldflags "-static"' -o "${TEMP_DIR}/binary-linux-amd64" ./cmd/mysql-cdc
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -a -ldflags '-extldflags "-static"' -o "${TEMP_DIR}/binary-linux-amd64" .
 create_platform_archive "linux" "amd64" "${TEMP_DIR}/binary-linux-amd64" ""
 
 # Linux ARM64
 echo "  Building Linux ARM64..."
-GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -a -ldflags '-extldflags "-static"' -o "${TEMP_DIR}/binary-linux-arm64" ./cmd/mysql-cdc
+GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -a -ldflags '-extldflags "-static"' -o "${TEMP_DIR}/binary-linux-arm64" .
 create_platform_archive "linux" "arm64" "${TEMP_DIR}/binary-linux-arm64" ""
 
 # macOS AMD64
 echo "  Building macOS AMD64..."
-GOOS=darwin GOARCH=amd64 go build -o "${TEMP_DIR}/binary-darwin-amd64" ./cmd/mysql-cdc
+GOOS=darwin GOARCH=amd64 go build -o "${TEMP_DIR}/binary-darwin-amd64" .
 create_platform_archive "darwin" "amd64" "${TEMP_DIR}/binary-darwin-amd64" ""
 
 # macOS ARM64 (Apple Silicon)
 echo "  Building macOS ARM64..."
-GOOS=darwin GOARCH=arm64 go build -o "${TEMP_DIR}/binary-darwin-arm64" ./cmd/mysql-cdc
+GOOS=darwin GOARCH=arm64 go build -o "${TEMP_DIR}/binary-darwin-arm64" .
 create_platform_archive "darwin" "arm64" "${TEMP_DIR}/binary-darwin-arm64" ""
 
 # Windows AMD64
 echo "  Building Windows AMD64..."
-GOOS=windows GOARCH=amd64 go build -o "${TEMP_DIR}/binary-windows-amd64.exe" ./cmd/mysql-cdc
+GOOS=windows GOARCH=amd64 go build -o "${TEMP_DIR}/binary-windows-amd64.exe" .
 create_platform_archive "windows" "amd64" "${TEMP_DIR}/binary-windows-amd64.exe" ".exe"
 
 # Clean up temporary directory
@@ -101,7 +101,4 @@ echo "   git tag -a ${VERSION} -m 'Release ${VERSION}'"
 echo "   git push origin ${VERSION}"
 echo ""
 echo "2. Upload release assets to GitHub:"
-echo "   ./scripts/upload-release.sh ${VERSION} 'Release ${VERSION}'"
-echo ""
-echo "   Or upload manually at:"
 echo "   https://github.com/$(git remote get-url origin | sed -E 's/.*github.com[:/]([^/]+\/[^/]+)(\.git)?$/\1/')/releases/new"

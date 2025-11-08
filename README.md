@@ -49,7 +49,7 @@ FLUSH PRIVILEGES;
 
 ```bash
 go mod download
-go build -o mysql-cdc ./cmd/mysql-cdc
+go build -o mysql-cdc .
 ```
 
 ## Configuration
