@@ -10,10 +10,11 @@ import (
 
 // Config represents the application configuration
 type Config struct {
-	MySQL   MySQLConfig   `yaml:"mysql"`
-	Binlog  BinlogConfig  `yaml:"binlog"`
-	NATS    NATSConfig    `yaml:"nats"`
-	Logging LoggingConfig `yaml:"logging"`
+	MySQL    MySQLConfig    `yaml:"mysql"`
+	Binlog   BinlogConfig   `yaml:"binlog"`
+	NATS     NATSConfig     `yaml:"nats"`
+	Logging  LoggingConfig  `yaml:"logging"`
+	Processor ProcessorConfig `yaml:"processor"`
 }
 
 // MySQLConfig contains MySQL connection settings
@@ -46,6 +47,23 @@ type NATSConfig struct {
 // LoggingConfig contains logging settings
 type LoggingConfig struct {
 	Level string `yaml:"level"`
+}
+
+// ProcessorConfig contains processor/transformer settings
+type ProcessorConfig struct {
+	Enabled     bool            `yaml:"enabled"`
+	Script      string          `yaml:"script"`      // Path to JavaScript transformation script
+	Rules       []ProcessorRule `yaml:"rules"`       // YAML-based transformation rules
+}
+
+// ProcessorRule defines transformation rules for specific tables
+type ProcessorRule struct {
+	Database   string            `yaml:"database"`   // Database name (empty = all databases)
+	Table      string            `yaml:"table"`      // Table name (empty = all tables)
+	Include    []string          `yaml:"include"`    // Fields to include (empty = all fields)
+	Exclude    []string          `yaml:"exclude"`     // Fields to exclude
+	Rename     map[string]string `yaml:"rename"`     // Field rename mapping (old_name -> new_name)
+	AddFields  map[string]string `yaml:"add_fields"` // Fields to add with static values
 }
 
 // LoadConfig loads configuration from a YAML file

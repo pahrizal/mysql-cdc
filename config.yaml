@@ -10,7 +10,7 @@ mysql:
 
 binlog:
   position_file: .binlog_position
-  start_position: 4
+  start_position: 0
   start_timestamp: 0
 
 nats:
@@ -21,4 +21,36 @@ nats:
 
 logging:
   level: info
+
+processor:
+  enabled: true  # Set to true to enable data transformation
+  script: example/transformer.js  # Path to JavaScript transformation script (takes precedence over rules)
+  # rules:
+    # Example: Transform events for a specific table
+    # - database: mydb
+    #   table: users
+    #   exclude:
+    #     - password
+    #     - ssn
+    #   rename:
+    #     email: user_email
+    #     name: full_name
+    #   add_fields:
+    #     source: mysql-cdc
+    #     processed_at: "2024-01-01"
+    
+    # Example: Include only specific fields for all tables in a database
+    # - database: mydb
+    #   include:
+    #     - id
+    #     - name
+    #     - created_at
+    
+    # Example: Exclude sensitive fields from all tables
+    # - database: ""
+    #   table: ""
+    #   exclude:
+    #     - password
+    #     - credit_card
+    #     - ssn
 

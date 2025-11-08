@@ -19,10 +19,12 @@ import (
 type Processor struct {
 	reader      Reader
 	publisher   Publisher
+	transformer *Transformer
 	logger      *logrus.Logger
-	tables      map[uint64]*replication.TableMapEvent // Cache table map events
-	columnNames map[string][]string                    // Cache column names by "database.table"
-	db          *sql.DB                                // Database connection for fetching column names
+	tables       map[uint64]*replication.TableMapEvent // Cache table map events
+	columnNames  map[string][]string                    // Cache column names by "database.table"
+	columnTypes  map[string][]string                    // Cache column types by "database.table"
+	db           *sql.DB                                // Database connection for fetching column names
 }
 
 // Reader interface for reading binlog events
@@ -36,7 +38,7 @@ type Publisher interface {
 }
 
 // NewProcessor creates a new event processor
-func NewProcessor(reader Reader, publisher Publisher, dbHost string, dbPort int, dbUser, dbPassword string, logger *logrus.Logger) (*Processor, error) {
+func NewProcessor(reader Reader, publisher Publisher, transformer *Transformer, dbHost string, dbPort int, dbUser, dbPassword string, logger *logrus.Logger) (*Processor, error) {
 	// Create database connection for fetching column names
 	dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/", dbUser, dbPassword, dbHost, dbPort)
 	db, err := sql.Open("mysql", dsn)
@@ -49,9 +51,11 @@ func NewProcessor(reader Reader, publisher Publisher, dbHost string, dbPort int,
 	return &Processor{
 		reader:      reader,
 		publisher:   publisher,
+		transformer: transformer,
 		logger:      logger,
 		tables:      make(map[uint64]*replication.TableMapEvent),
 		columnNames: make(map[string][]string),
+		columnTypes: make(map[string][]string),
 		db:          db,
 	}, nil
 }
@@ -63,44 +67,48 @@ func (p *Processor) Close() {
 	}
 }
 
-// getColumnNames fetches column names from MySQL for a given table
-func (p *Processor) getColumnNames(database, table string) ([]string, error) {
+// getColumnInfo fetches column names and types from MySQL for a given table
+func (p *Processor) getColumnInfo(database, table string) ([]string, []string, error) {
 	// Check cache first
 	cacheKey := fmt.Sprintf("%s.%s", database, table)
 	if cols, ok := p.columnNames[cacheKey]; ok {
-		return cols, nil
+		types, _ := p.columnTypes[cacheKey]
+		return cols, types, nil
 	}
 
-	// Query INFORMATION_SCHEMA for column names
+	// Query INFORMATION_SCHEMA for column names and types
 	query := `
-		SELECT COLUMN_NAME 
+		SELECT COLUMN_NAME, COLUMN_TYPE
 		FROM INFORMATION_SCHEMA.COLUMNS 
 		WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? 
 		ORDER BY ORDINAL_POSITION
 	`
 	rows, err := p.db.Query(query, database, table)
 	if err != nil {
-		return nil, fmt.Errorf("failed to query column names: %w", err)
+		return nil, nil, fmt.Errorf("failed to query column info: %w", err)
 	}
 	defer rows.Close()
 
 	var columns []string
+	var types []string
 	for rows.Next() {
-		var colName string
-		if err := rows.Scan(&colName); err != nil {
-			return nil, fmt.Errorf("failed to scan column name: %w", err)
+		var colName, columnType string
+		if err := rows.Scan(&colName, &columnType); err != nil {
+			return nil, nil, fmt.Errorf("failed to scan column info: %w", err)
 		}
 		columns = append(columns, colName)
+		types = append(types, columnType) // Use COLUMN_TYPE for more detailed info
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterating columns: %w", err)
+		return nil, nil, fmt.Errorf("error iterating columns: %w", err)
 	}
 
-	// Cache the result
+	// Cache the results
 	p.columnNames[cacheKey] = columns
-	p.logger.Debugf("Fetched %d column names for %s.%s", len(columns), database, table)
+	p.columnTypes[cacheKey] = types
+	p.logger.Debugf("Fetched %d column names and types for %s.%s", len(columns), database, table)
 
-	return columns, nil
+	return columns, types, nil
 }
 
 // ProcessRowEvent processes a row event and returns a change event
@@ -114,20 +122,27 @@ func (p *Processor) ProcessRowEvent(event *replication.RowsEvent, eventType stri
 	database := string(event.Table.Schema)
 	table := string(event.Table.Table)
 
-	// Get column names - try from TableMapEvent first (MySQL 8.0+), otherwise fetch from MySQL
+	// Get column names and types - try from TableMapEvent first (MySQL 8.0+), otherwise fetch from MySQL
 	var columnNames []string
+	var columnTypes []string
 	if len(tableMap.ColumnName) > 0 {
 		// Column names available in binlog (MySQL 8.0+ with binlog_row_metadata)
 		columnNames = make([]string, len(tableMap.ColumnName))
 		for i, col := range tableMap.ColumnName {
 			columnNames[i] = string(col)
 		}
-	} else {
-		// Fetch column names from MySQL (for MySQL 5.6/5.7)
+		// Still need to fetch types from MySQL for MySQL 8.0+
 		var err error
-		columnNames, err = p.getColumnNames(database, table)
+		_, columnTypes, err = p.getColumnInfo(database, table)
 		if err != nil {
-			return nil, fmt.Errorf("failed to get column names: %w", err)
+			p.logger.Warnf("Failed to get column types: %v, continuing without type info", err)
+		}
+	} else {
+		// Fetch column names and types from MySQL (for MySQL 5.6/5.7)
+		var err error
+		columnNames, columnTypes, err = p.getColumnInfo(database, table)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get column info: %w", err)
 		}
 		// Ensure we have enough column names
 		if len(columnNames) < int(tableMap.ColumnCount) {
@@ -144,6 +159,45 @@ func (p *Processor) ProcessRowEvent(event *replication.RowsEvent, eventType stri
 		Type:      eventType,
 	}
 
+	// Helper function to convert value based on column type
+	convertValue := func(value interface{}, colIndex int) interface{} {
+		if value == nil {
+			return nil
+		}
+		
+		// If we have column type info, check if it's a TEXT type
+		if colIndex < len(columnTypes) {
+			colType := strings.ToUpper(columnTypes[colIndex])
+			// Check if it's a TEXT type (TEXT, TINYTEXT, MEDIUMTEXT, LONGTEXT)
+			if strings.Contains(colType, "TEXT") {
+				// Convert []byte to string for TEXT columns
+				if b, ok := value.([]byte); ok {
+					return string(b)
+				}
+			}
+			// For BLOB types, keep as base64 (or could convert to string if desired)
+			// BLOB types are kept as []byte which will be base64 encoded in JSON
+		}
+		
+		// For []byte values without type info, try to convert to string
+		// This handles cases where type info is not available
+		if b, ok := value.([]byte); ok {
+			// Try to detect if it's valid UTF-8 text
+			if len(b) > 0 {
+				// Check if it looks like text (not binary)
+				// Simple heuristic: if it's valid UTF-8 and doesn't contain null bytes, treat as text
+				if len(b) < 65535 { // Reasonable size limit for TEXT
+					if str := string(b); len(str) == len(b) {
+						// No null bytes, likely text
+						return str
+					}
+				}
+			}
+		}
+		
+		return value
+	}
+
 	// Process rows based on event type
 	if eventType == "UPDATE" {
 		// For UPDATE, event.Rows contains [old_row_1, new_row_1, old_row_2, new_row_2, ...]
@@ -152,14 +206,14 @@ func (p *Processor) ProcessRowEvent(event *replication.RowsEvent, eventType stri
 				// Old row
 				oldRowMap := make(map[string]interface{})
 				for j := 0; j < len(event.Rows[i]) && j < len(columnNames); j++ {
-					oldRowMap[columnNames[j]] = event.Rows[i][j]
+					oldRowMap[columnNames[j]] = convertValue(event.Rows[i][j], j)
 				}
 				changeEvent.OldRows = append(changeEvent.OldRows, oldRowMap)
 
 				// New row
 				newRowMap := make(map[string]interface{})
 				for j := 0; j < len(event.Rows[i+1]) && j < len(columnNames); j++ {
-					newRowMap[columnNames[j]] = event.Rows[i+1][j]
+					newRowMap[columnNames[j]] = convertValue(event.Rows[i+1][j], j)
 				}
 				changeEvent.Rows = append(changeEvent.Rows, newRowMap)
 			}
@@ -169,7 +223,7 @@ func (p *Processor) ProcessRowEvent(event *replication.RowsEvent, eventType stri
 		for _, row := range event.Rows {
 			rowMap := make(map[string]interface{})
 			for j := 0; j < len(row) && j < len(columnNames); j++ {
-				rowMap[columnNames[j]] = row[j]
+				rowMap[columnNames[j]] = convertValue(row[j], j)
 			}
 			changeEvent.Rows = append(changeEvent.Rows, rowMap)
 		}
@@ -230,6 +284,30 @@ func (p *Processor) Start(ctx context.Context) error {
 					p.logger.Errorf("Error processing %s event: %v", eventType, err)
 					continue
 				}
+
+				// Store database/table info before transformation (in case event is rejected)
+				database := changeEvent.Database
+				table := changeEvent.Table
+
+				// Apply transformations if transformer is configured
+				if p.transformer != nil {
+					changeEvent, err = p.transformer.Transform(changeEvent)
+					if err != nil {
+						// Check if event was rejected (not an error, just skip publishing)
+						if errors.Is(err, ErrEventRejected) {
+							p.logger.Debugf("Event rejected by transformer: %s.%s (type: %s)", database, table, eventType)
+							continue
+						}
+						p.logger.Errorf("Error transforming event: %v", err)
+						continue
+					}
+					// Check if changeEvent became nil after transformation
+					if changeEvent == nil {
+						p.logger.Debugf("Event rejected by transformer: %s.%s (type: %s)", database, table, eventType)
+						continue
+					}
+				}
+
 				if err := p.publisher.Publish(changeEvent); err != nil {
 					p.logger.Errorf("Error publishing event: %v", err)
 					continue

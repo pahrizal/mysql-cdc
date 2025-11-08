@@ -7,80 +7,33 @@ A Go-based MySQL Change Data Capture system that reads row-level changes from My
 - **Row-level CDC**: Captures INSERT, UPDATE, and DELETE operations at the row level
 - **Binlog Reading**: Directly reads from MySQL binary log (binlog)
 - **NATS Streaming**: Publishes change events to NATS subjects
+- **Data Transformation**: Configurable processor to transform data before publishing (YAML rules or JavaScript scripts)
 - **Position Tracking**: Persists binlog position for recovery and resumption
 - **Graceful Shutdown**: Handles SIGINT/SIGTERM signals gracefully
 - **Configurable**: YAML-based configuration
-
-## Limitations
-
-**Current Limitations:**
-- **Output Destination**: Currently only supports streaming to NATS. Other messaging systems (Kafka, RabbitMQ, etc.) are not supported.
-- **Source Database**: Only MySQL is supported. MariaDB may work but is not officially tested.
-- **MySQL Versions**: Tested with MySQL 5.6, 5.7, and 8.0. Other versions may work but are not guaranteed.
-
-## Project Structure
-
-This project follows Go best practices with a standard project layout:
-
-```
-mysql-cdc/
-├── cmd/
-│   └── mysql-cdc/          # Main application entry point
-│       └── main.go
-├── internal/                # Private application code
-│   ├── binlog/             # Binlog reader implementation
-│   ├── config/             # Configuration loading
-│   ├── models/              # Shared data models
-│   ├── mysql/               # MySQL connection checker
-│   ├── nats/                # NATS publisher
-│   └── processor/           # Event processor
-├── scripts/                 # Build and utility scripts
-│   └── build-static.sh
-├── config.yaml              # Configuration file
-├── go.mod                   # Go module definition
-└── README.md                # This file
-```
-
-## Prerequisites
-
-- Go 1.21 or higher
-- MySQL 5.6+ with binlog enabled (tested with MySQL 5.6, 5.7, 8.0)
-- NATS server running
 
 ## MySQL Setup
 
 Enable binary logging in MySQL (`my.cnf` or `my.ini`):
 
-**For MySQL 5.6:**
+**Basic Configuration:**
 ```ini
 [mysqld]
-# Required for binlog and GTID
 log-bin=mysql-bin
 binlog-format=ROW
 server-id=1
+```
 
-# Required for GTID (MySQL 5.6+)
+**For GTID Support (MySQL 5.6+):**
+```ini
+[mysqld]
+log-bin=mysql-bin
+binlog-format=ROW
+server-id=1
 log-slave-updates=ON
 gtid-mode=ON
 enforce-gtid-consistency=ON
 ```
-
-**Important Notes for MySQL 5.6 GTID:**
-- `log-bin` must be enabled (required for binary logging)
-- `log-slave-updates` must be enabled (required for GTID mode)
-- `gtid-mode=ON` enables GTID replication
-- `enforce-gtid-consistency=ON` ensures only GTID-safe statements are executed
-- After enabling GTID, restart MySQL server
-
-**For MySQL 5.7+:**
-```ini
-[mysqld]
-log-bin=mysql-bin
-binlog-format=ROW
-server-id=1
-```
-
-**Note:** MySQL 5.6 introduced GTID (Global Transaction Identifier) support. You can enable GTID-based replication by setting `use_gtid: true` in the configuration file. This provides better replication reliability and failover capabilities.
 
 Create a MySQL user with replication privileges:
 
@@ -93,30 +46,10 @@ FLUSH PRIVILEGES;
 
 ## Installation
 
-1. Clone or download this repository
-2. Install dependencies:
-
 ```bash
 go mod download
-```
-
-3. Build the application:
-
-**Standard build:**
-```bash
 go build -o mysql-cdc ./cmd/mysql-cdc
 ```
-
-**Static binary for Alpine Linux:**
-```bash
-# Option 1: Use the build script
-./scripts/build-static.sh
-
-# Option 2: Build manually
-GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -a -ldflags '-extldflags "-static"' -o mysql-cdc-linux-amd64 ./cmd/mysql-cdc
-```
-
-The static binary (`mysql-cdc-linux-amd64`) can be run on Alpine Linux without requiring any additional dependencies or glibc.
 
 ## Configuration
 
@@ -146,6 +79,12 @@ nats:
 
 logging:
   level: info
+
+processor:
+  enabled: false  # Set to true to enable data transformation
+  # script: scripts/transform.js  # Path to JavaScript transformation script (takes precedence over rules)
+  rules:
+    # YAML-based transformation rules (see Processor Configuration section)
 ```
 
 ### Configuration Options
@@ -156,27 +95,15 @@ logging:
 - **mysql.password**: MySQL password
 - **mysql.server_id**: Unique server ID for replication (must be different from MySQL server)
 - **mysql.flavor**: Database flavor (`mysql` or `mariadb`). Defaults to `mysql`
-- **mysql.version**: Optional MySQL version string (e.g., "5.6", "5.7", "8.0") for documentation/logging purposes
-- **mysql.use_gtid**: Enable GTID-based replication (MySQL 5.6+). Recommended for better reliability and failover
+- **mysql.use_gtid**: Enable GTID-based replication (MySQL 5.6+)
 - **binlog.position_file**: File to persist binlog position
 - **binlog.start_position**: Starting position (use 4 for beginning)
 - **nats.url**: NATS server URL
 - **nats.subject**: NATS subject to publish events
 - **logging.level**: Log level (debug, info, warn, error)
-
-### MySQL 5.6 Specific Notes
-
-- MySQL 5.6 is fully supported with the `mysql` flavor
-- GTID support is available in MySQL 5.6.5+ and can be enabled by setting `use_gtid: true`
-- **Required MySQL configuration for GTID:**
-  - `log-bin=mysql-bin` (binary logging)
-  - `log-slave-updates=ON` (required for GTID mode)
-  - `gtid-mode=ON` (enables GTID)
-  - `enforce-gtid-consistency=ON` (ensures GTID-safe operations)
-  - `binlog-format=ROW` (required for row-level CDC)
-- When using GTID, the position file will store GTID information instead of file:position format
-- After enabling GTID in MySQL config, restart the MySQL server
-- If you get errors about missing `log-bin` or `log-slave-updates`, ensure both are enabled in your MySQL configuration
+- **processor.enabled**: Enable/disable data transformation
+- **processor.script**: Path to JavaScript transformation script (takes precedence over rules)
+- **processor.rules**: YAML-based transformation rules
 
 ## Usage
 
@@ -192,6 +119,135 @@ Or specify a custom config file:
 ./mysql-cdc /path/to/config.yaml
 ```
 
+## Processor Configuration
+
+The processor allows you to transform change events before they are published to NATS. You can use either JavaScript scripts or YAML-based rules.
+
+### JavaScript Script Processor
+
+You can write custom JavaScript transformation scripts for maximum flexibility. The script can use either:
+1. **Anonymous function** (recommended): `(function(event) { return event; })`
+2. **Named function** (backward compatible): `function transform(event) { return event; }`
+
+**Key Features:**
+- **Event Rejection**: Return `null` or `undefined` to reject/drop an event (it won't be published to NATS)
+- **Full Event Access**: Access all event properties including `type`, `database`, `table`, `timestamp`, `rows`, and `old_rows`
+- **Row Transformation**: Modify, filter, or add fields to individual rows
+- **Metadata Addition**: Add custom fields to the event object
+
+**Example JavaScript script using anonymous function (`scripts/transform.js`):**
+
+```javascript
+(function(event) {
+    // Example: Reject events from certain tables
+    if (event.table === 'sensitive_table') {
+        return null; // Reject/drop this event
+    }
+    
+    // Example: Reject DELETE events
+    if (event.type === 'DELETE') {
+        return null;
+    }
+    
+    // Example: Reject events based on row data
+    if (event.rows && event.rows.length > 0) {
+        var firstRow = event.rows[0];
+        if (firstRow.status === 'deleted' || firstRow.status === 'archived') {
+            return null; // Reject events where status is 'deleted' or 'archived'
+        }
+    }
+    
+    // Add a processed timestamp
+    event.processed_at = new Date().toISOString();
+    
+    // Transform rows - exclude sensitive fields
+    if (event.rows && Array.isArray(event.rows)) {
+        event.rows = event.rows.map(function(row) {
+            // Remove password field if it exists
+            if (row.password !== undefined) {
+                delete row.password;
+            }
+            // Rename email to user_email
+            if (row.email !== undefined) {
+                row.user_email = row.email;
+                delete row.email;
+            }
+            return row;
+        });
+    }
+    
+    // Add metadata
+    event.metadata = {
+        source: "mysql-cdc",
+        processor: "javascript"
+    };
+    
+    return event;
+})
+
+// Alternative: Named function (also supported)
+// function transform(event) {
+//     // ... same code ...
+//     return event;
+// }
+```
+
+**Configuration:**
+
+```yaml
+processor:
+  enabled: true
+  script: scripts/transform.js
+```
+
+**Event Rejection:** Return `null` or `undefined` to reject/drop an event (it won't be published to NATS).
+
+### YAML-Based Rules Processor
+
+For simpler transformations, you can use YAML-based rules:
+
+```yaml
+processor:
+  enabled: true
+  rules:
+    # Exclude sensitive fields from a specific table
+    - database: mydb
+      table: users
+      exclude:
+        - password
+        - ssn
+      rename:
+        email: user_email
+        name: full_name
+      add_fields:
+        source: mysql-cdc
+    
+    # Include only specific fields for all tables in a database
+    - database: mydb
+      include:
+        - id
+        - name
+        - created_at
+    
+    # Exclude sensitive fields from all tables
+    - database: ""
+      table: ""
+      exclude:
+        - password
+        - credit_card
+```
+
+**Rule Options:**
+
+- **database**: Database name (empty string = all databases)
+- **table**: Table name (empty string = all tables)
+- **include**: List of fields to include (all other fields excluded)
+- **exclude**: List of fields to exclude
+- **rename**: Map of old field names to new field names
+- **add_fields**: Map of static field names and values to add
+
+**Note:** You cannot specify both `include` and `exclude` in the same rule. If both `script` and `rules` are specified, the script takes precedence.
+
 ## Event Format
 
 Events are published to NATS as JSON messages with the following structure:
@@ -205,7 +261,9 @@ Events are published to NATS as JSON messages with the following structure:
   "rows": [
     {
       "column1": "value1",
-      "column2": "value2"
+      "column2": "value2",
+      "text_field": "readable text content",
+      "json_field": "{\"key\":\"value\"}"
     }
   ],
   "old_rows": [
@@ -213,7 +271,12 @@ Events are published to NATS as JSON messages with the following structure:
       "column1": "old_value1",
       "column2": "old_value2"
     }
-  ]
+  ],
+  "processed_at": "2024-01-01T12:00:00Z",
+  "metadata": {
+    "source": "mysql-cdc",
+    "processor": "javascript"
+  }
 }
 ```
 
@@ -221,56 +284,13 @@ Events are published to NATS as JSON messages with the following structure:
 - **UPDATE**: `rows` contains new values, `old_rows` contains old values
 - **DELETE**: Only `rows` field contains the deleted rows
 
-## Testing with NATS
+### Data Type Handling
 
-Subscribe to events using NATS CLI:
+- **TEXT Fields**: Automatically converted from binary/byte arrays to readable strings (TEXT, TINYTEXT, MEDIUMTEXT, LONGTEXT)
+- **BLOB Fields**: Kept as base64-encoded strings in JSON (BLOB, TINYBLOB, MEDIUMBLOB, LONGBLOB)
+- **Other Types**: Standard MySQL types are preserved as-is (INT, VARCHAR, DATETIME, etc.)
 
-```bash
-nats sub mysql.cdc.events
-```
-
-Or using Go:
-
-```go
-nc, _ := nats.Connect("nats://localhost:4222")
-sub, _ := nc.Subscribe("mysql.cdc.events", func(msg *nats.Msg) {
-    fmt.Printf("Received: %s\n", string(msg.Data))
-})
-```
-
-## Docker / Alpine Linux Support
-
-This project can be built as a static binary that runs on Alpine Linux and other minimal Linux distributions. The static binary includes all dependencies and doesn't require glibc.
-
-### Building Static Binary
-
-Use the provided build script:
-```bash
-./build-static.sh
-```
-
-Or build manually:
-```bash
-GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -a -ldflags '-extldflags "-static"' -o mysql-cdc-linux-amd64
-```
-
-### Docker Example
-
-Example Dockerfile using Alpine Linux:
-
-```dockerfile
-FROM alpine:latest
-
-# Copy the static binary
-COPY mysql-cdc-linux-amd64 /usr/local/bin/mysql-cdc
-COPY config.yaml /etc/mysql-cdc/config.yaml
-
-# Make it executable
-RUN chmod +x /usr/local/bin/mysql-cdc
-
-# Run the application
-CMD ["/usr/local/bin/mysql-cdc", "/etc/mysql-cdc/config.yaml"]
-```
+**Note:** The processor automatically detects TEXT column types and converts them to strings, so you'll see readable text content instead of base64-encoded strings for TEXT fields.
 
 ## Position Tracking
 
@@ -282,11 +302,9 @@ The application saves the current binlog position to `.binlog_position` file. On
 2. **No events**: Ensure binlog is enabled and `binlog-format=ROW` is set
 3. **NATS connection issues**: Verify NATS server is running and URL is correct
 4. **Permission errors**: Ensure the application has write access to the position file directory
-5. **GTID configuration errors**: 
-   - If you get `--gtid-mode=ON requires --log-bin and --log-slave-updates`, ensure both are enabled in MySQL config
-   - Add `log-slave-updates=ON` to your `my.cnf` file
-   - Restart MySQL after configuration changes
-   - See `GTID_CONFIG.md` for detailed GTID setup instructions
+5. **GTID configuration errors**: Ensure `log-bin` and `log-slave-updates` are enabled in MySQL config
+6. **JavaScript processor errors**: Check script syntax and file path, enable debug logging for details
+7. **TEXT fields showing as base64**: Ensure MySQL user has SELECT permission on INFORMATION_SCHEMA
 
 ## License
 

@@ -1,0 +1,84 @@
+// Example JavaScript transformation script
+// You can use either:
+// 1. Anonymous function: (function(event) { return event; })
+// 2. Named function: function transform(event) { return event; }
+// 
+// To reject/drop an event, return null or undefined
+
+// Option 1: Anonymous function (recommended)
+(function(event) {
+    // Example: Reject events from certain tables
+    if (event.table === 'sensitive_table') {
+        // Return null or undefined to reject/drop this event
+        return null;
+    }
+    
+    // Example: Reject DELETE events
+    if (event.type === 'DELETE') {
+        return null;
+    }
+    
+    // Example: Reject events based on row data
+    if (event.rows && event.rows.length > 0) {
+        var firstRow = event.rows[0];
+        if (firstRow.status === 'deleted' || firstRow.status === 'archived') {
+            return null; // Reject events where status is 'deleted' or 'archived'
+        }
+    }
+    
+    // Example: Add a processed timestamp
+    event.processed_at = new Date().toISOString();
+    
+    // Example: Transform rows - exclude sensitive fields
+    if (event.rows && Array.isArray(event.rows)) {
+        event.rows = event.rows.map(function(row) {
+            // Remove password field if it exists
+            if (row.password !== undefined) {
+                delete row.password;
+            }
+            // Remove ssn field if it exists
+            if (row.ssn !== undefined) {
+                delete row.ssn;
+            }
+            // Rename email to user_email
+            if (row.email !== undefined) {
+                row.user_email = row.email;
+                delete row.email;
+            }
+            return row;
+        });
+    }
+    
+    // Example: Transform old rows for UPDATE events
+    if (event.old_rows && Array.isArray(event.old_rows)) {
+        event.old_rows = event.old_rows.map(function(row) {
+            if (row.password !== undefined) {
+                delete row.password;
+            }
+            if (row.ssn !== undefined) {
+                delete row.ssn;
+            }
+            if (row.email !== undefined) {
+                row.user_email = row.email;
+                delete row.email;
+            }
+            return row;
+        });
+    }
+    
+    // Example: Add metadata
+    event.metadata = {
+        source: "mysql-cdc",
+        processor: "javascript"
+    };
+    
+    // Return the transformed event
+    return event;
+})
+
+// Option 2: Named function (also supported for backward compatibility)
+// function transform(event) {
+//     // ... same code as above ...
+//     return event;
+// }
+

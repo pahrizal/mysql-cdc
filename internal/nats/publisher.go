@@ -52,9 +52,17 @@ func NewPublisher(url, subject string, maxReconnect int, reconnectWait time.Dura
 
 // Publish publishes a change event to NATS
 func (p *Publisher) Publish(event *models.ChangeEvent) error {
-	data, err := json.Marshal(event)
-	if err != nil {
-		return fmt.Errorf("failed to marshal event: %w", err)
+	// Use raw JSON if available (from JavaScript transformation), otherwise marshal the struct
+	var data []byte
+	var err error
+	
+	if len(event.RawJSON) > 0 {
+		data = event.RawJSON
+	} else {
+		data, err = json.Marshal(event)
+		if err != nil {
+			return fmt.Errorf("failed to marshal event: %w", err)
+		}
 	}
 
 	if err := p.conn.Publish(p.subject, data); err != nil {

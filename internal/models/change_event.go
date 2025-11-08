@@ -8,5 +8,6 @@ type ChangeEvent struct {
 	Timestamp int64                  `json:"timestamp"`
 	Rows      []map[string]interface{} `json:"rows"`
 	OldRows   []map[string]interface{} `json:"old_rows,omitempty"` // For UPDATE events
+	RawJSON   []byte                 `json:"-"`         // Raw JSON from JavaScript transformation (if available)
 }
 
